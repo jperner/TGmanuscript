@@ -14,5 +14,6 @@ Both matrices need to be downloaded from the GEO repository and are the starting
 
 All exploratory and differential gene expression analyses were performed in R (version 4.1.1) and the code for all steps is provided in the Rmarkdown file under src/. Please refer to the pdf generated from the Rmarkdown file for versions of individual packages used.
 
-
+## DOI
+[![DOI](https://zenodo.org/badge/640628129.svg)](https://zenodo.org/badge/latestdoi/640628129)
 
