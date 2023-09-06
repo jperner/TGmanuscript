@@ -1,0 +1,398 @@
+---
+title: "Transgenerational study - Gene expression analysis of F2 liver"
+author: "J.Beil and J. Perner"
+output:
+  pdf_document:
+    keep_tex: yes
+    extra_dependencies: amsmath
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      error = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE,
+                      fig.align = "center",
+                      dev = c("png", "cairo_pdf"))
+```
+
+```{r libraries, include=FALSE}
+library(DESeq2)
+library(biomaRt)
+
+source("./src/utils.R")
+```
+
+# LOAD DATA 
+
+```{r data}
+counts <- read.csv("./data/GSE229524_liver_RNA_counts.csv.gz", row.names = 1)
+colnames(counts) <- gsub("animal|_liver_RNA", "", colnames(counts))
+
+avgTx_length <- read.csv("./data/GSE229524_liver_RNA_avgTxLength.csv.gz", row.names = 1)
+colnames(avgTx_length) <- gsub("animal|_liver_RNA", "", colnames(avgTx_length))
+  
+animal_metadata <- read.csv2("./data/animal_metadata.csv", sep=",")
+row.names(animal_metadata) <- animal_metadata$animal
+```
+
+```{r geneanno}
+# 100: https://apr2020.archive.ensembl.org
+ensembl100 <- useEnsembl(biomart = "ENSEMBL_MART_ENSEMBL", 
+                         dataset = "rnorvegicus_gene_ensembl",
+                         version = 100)
+anno <- getBM(attributes = c("ensembl_gene_id_version", "ensembl_gene_id", "rgd_symbol"),
+              filters = "ensembl_gene_id_version",
+              values = row.names(counts),
+              mart = ensembl100)
+
+# collapse duplicated gene names
+tmp1 <- split(anno$rgd_symbol, anno$ensembl_gene_id_version)
+tmp1 <- sapply(tmp1, paste0, collapse=";")
+tmp2 <- unique(anno[,1:2])[, 2]
+names(tmp2) <- unique(anno[,1:2])[, 1]
+anno <- data.frame(ensembl_gene_id = tmp2,
+                   rgd_symbol = tmp1[names(tmp2)],
+                   row.names = names(tmp2))
+```
+
+```{r deseq_obj}
+dds <- DESeqDataSetFromMatrix(counts,
+                              colData=DataFrame(animal_metadata[colnames(counts), ]), 
+                              design=~ F0 + F1 + F2)
+assay(dds, "avgTxLength") <- avgTx_length[, colnames(dds)]
+```
+
+# FILTER DATA 
+
+```{r genefilter}
+# filter genes by group: samples in each group should together have at least 10 reads
+idx <- split(row.names(colData(dds)), colData(dds)[, c("F0andF1", "F2")])
+keep <- sapply(idx, function(i) rowSums(counts(dds)[, i])>10)
+dds <- dds[rowSums(keep)>0, ]
+```
+
+# F0 AND F1 DIFFERENTIAL EXPRESSION ANALYSIS
+
+```{r de}
+dds <- DESeq(dds)
+res_f0 <- results(dds, name="F0_treated_vs_control")
+res_f1 <- results(dds, name="F1_treated_vs_control")
+```
+
+# EXPLORATORY ANALYSIS
+
+```{r vsd}
+# variance stabilizing transformation for PCA plots 
+vsd <- vst(dds)
+```
+
+# all groups
+
+```{r PCA_allF2, fig.width=4, fig.height=3}
+pca <- runPCA_topN(assay(vsd), 3000)
+vars <- plot_ExplainedVar(pca, "PCA with all F2 samples")
+```
+
+```{r plot_PCA_allF2, fig.show='hold', fig.width=5, fig.height=3}
+# prepare data frame for plotting
+toplot <- data.frame(PC1=pca$x[,1], 
+                     PC2=pca$x[,2],
+                     PC3=pca$x[,3],
+                     PC4=pca$x[,4],
+                     PC5=pca$x[,5])
+toplot <- cbind(toplot, colData(dds)[row.names(toplot), ])
+toplot <- as.data.frame(toplot)
+
+# set aesthetics;
+setcols <- rev(viridis(4)[-c(4)])
+names(setcols) <- c("control", "low_dose", "high_dose")
+
+# single plot for PC1 and PC2
+plot_PC_1to2(toplot, setcols, "", vars=vars, 
+             col_var = "F2", col_var_name="dose group", 
+             shape_var="F0andF1")
+```
+
+# F2 treatment groups only (example: control group)
+
+```{r PCAallControl, fig.width=4, fig.height=3}
+# subselect samples for PCA
+vsd_sub <- assay(vsd)[, colData(vsd)$F2%in%"control"]
+pca <- runPCA_topN(vsd_sub)
+vars <- plot_ExplainedVar(pca, "PCA with F2 control")
+```
+
+```{r plotallControl, fig.show='hold', fig.width=5.5, fig.height=4}
+toplot <- data.frame(PC1=pca$x[,1], 
+                     PC2=pca$x[,2],
+                     PC3=pca$x[,3],
+                     PC4=pca$x[,4],
+                     PC5=pca$x[,5])
+toplot <- cbind(toplot, colData(dds)[row.names(toplot), ])
+toplot <- as.data.frame(toplot)
+
+plot_PC_1to2(toplot, setcols, "PCA with F2 control", vars, 
+             col_var = "F2", col_var_name="dose group", 
+             shape_var="F0andF1") 
+```
+
+# DE ANALYSIS BETWEEN TREATMENT GROUP WITHIN COHORT
+
+```{r DE_groupwise}
+# build new grouping variable for easier referencing based on cohort and F2 treatment
+tmp <- unite(as.data.frame(colData(dds)), Group, c(F0andF1, F2)) %>% pull(Group)
+colData(dds)$Group <- factor(tmp, sort(unique(tmp)))
+
+# rerun DE analysis
+design(dds) <- ~ Group
+dds <- DESeq(dds)
+```
+
+```{r groupDE_stats}
+# keep statistics for each group
+resA_LDvsCtrl <- results(dds, contrast =c("Group", "A_low_dose", "A_control"))
+resA_HDvsCtrl <- results(dds, contrast =c("Group", "A_high_dose", "A_control"))
+
+resB_LDvsCtrl <- results(dds, contrast =c("Group", "B_low_dose", "B_control"))
+resB_HDvsCtrl <- results(dds, contrast =c("Group", "B_high_dose", "B_control"))
+
+resC_LDvsCtrl <- results(dds, contrast =c("Group", "C_low_dose", "C_control"))
+resC_HDvsCtrl <- results(dds, contrast =c("Group", "C_high_dose", "C_control"))
+
+resD_LDvsCtrl <- results(dds, contrast =c("Group", "D_low_dose", "D_control"))
+resD_HDvsCtrl <- results(dds, contrast =c("Group", "D_high_dose", "D_control"))
+```
+
+```{r groupDE_volcano, fig.width=5, fig.height=5}
+# volcano plots for different contrasts - example cohort A
+plot_Volcano(resA_LDvsCtrl, "Cohort A - low dose vs control" )
+plot_Volcano(resA_HDvsCtrl, "Cohort A - high dose vs control")
+```
+
+```{r groupDE_genes}
+# select differentially expressed genes
+resA_LDvsCtrl_sig <- selectSignGenes(resA_LDvsCtrl)
+resA_HDvsCtrl_sig <- selectSignGenes(resA_HDvsCtrl)
+
+resB_LDvsCtrl_sig <- selectSignGenes(resB_LDvsCtrl) 
+resB_HDvsCtrl_sig <- selectSignGenes(resB_HDvsCtrl) 
+
+resC_LDvsCtrl_sig <- selectSignGenes(resC_LDvsCtrl) 
+resC_HDvsCtrl_sig <- selectSignGenes(resC_HDvsCtrl) 
+
+resD_LDvsCtrl_sig <- selectSignGenes(resD_LDvsCtrl)
+resD_HDvsCtrl_sig <- selectSignGenes(resD_HDvsCtrl) 
+```
+
+```{r groupDE_gene_overlap}
+# check overlap of DE genes for different contrasts - example for low dose vs control contrasts
+pp <- upset(fromList(list(A_LDvsCtrl=row.names(resA_LDvsCtrl_sig), 
+                          B_LDvsCtrl=row.names(resB_LDvsCtrl_sig), 
+                          C_LDvsCtrl=row.names(resC_LDvsCtrl_sig), 
+                          D_LDvsCtrl=row.names(resD_LDvsCtrl_sig))), 
+            sets = c("D_LDvsCtrl", "C_LDvsCtrl", "B_LDvsCtrl", "A_LDvsCtrl"),
+            keep.order=TRUE,
+            empty.intersections = FALSE,
+            order.by = c("degree", "freq"), 
+            decreasing = c(FALSE, TRUE),
+            text.scale = 1.4)
+pp
+```
+
+```{r groupDE_cohortA_GOterms, fig.width=7, fig.height=6}
+# define gene universe = all genes for which we could calculate DE statistics in the two contrasts
+res_list <- list(resA_LDvsCtrl, resA_HDvsCtrl)
+common_genes <- row.names(resA_HDvsCtrl)[rowSums(is.na(sapply(res_list, function(x) x$padj))) <1]
+
+# list of selected DE genes by contrast 
+de_genes <- list(`low dose vs.\ncontrol` = row.names(resA_LDvsCtrl_sig), 
+                 `high dose vs.\ncontrol` = row.names(resA_HDvsCtrl_sig))
+
+# map to Ensemble gene ID 
+common_genes <- sapply(common_genes, function(x) anno[x, "ensembl_gene_id"])
+de_genes <- lapply(de_genes, function(x) anno[x, "ensembl_gene_id"])
+
+# GO term enrichment analysis (biological processes only) comparing the two contrasts 
+go_term_A <- compareCluster(geneClusters= de_genes, 
+                            fun = "enrichGO",
+                            universe = common_genes,
+                            OrgDb = "org.Rn.eg.db",
+                            keyType = "ENSEMBL",
+                            ont = "BP",
+                            pvalueCutoff = 0.01,
+                            qvalueCutoff = 0.05, 
+                            pAdjustMethod = "fdr",
+                            minGSSize = 10, 
+                            maxGSSize = 500)
+
+#cut some redundant GO terms
+go_term_A_simple <- clusterProfiler::simplify(go_term_A,
+                                              cutoff=0.7,
+                                              by="p.adjust",
+                                              select_fun=min)
+
+# plot results 
+dotplot(go_term_A_simple, showCategory=10, title="Cohort A") 
+```
+
+```{r groupDE_allCohorts_GOterms, fig.width=15, fig.height=12}
+### common_genes based on all groups
+res_list <- list(resA_HDvsCtrl, resB_HDvsCtrl, resC_HDvsCtrl, resD_HDvsCtrl,
+                 resA_LDvsCtrl, resB_LDvsCtrl, resC_LDvsCtrl, resD_LDvsCtrl)
+common_genes <- row.names(resA_HDvsCtrl)[rowSums(is.na(sapply(res_list, function(x) x$padj))) <1]
+common_genes <- sapply(common_genes, function(x) anno[x, "ensembl_gene_id"])
+
+#compare significant genes in one de_genes list as different geneClusters
+de_genes <- list( `Cohort A\nlow dose vs.\ncontrol` =row.names(resA_LDvsCtrl_sig),
+                  `Cohort B\nlow dose vs.\ncontrol`=row.names(resB_LDvsCtrl_sig),
+                  `Cohort C\nlow dose vs.\ncontrol`=row.names(resC_LDvsCtrl_sig),
+                  `Cohort D\nlow dose vs.\ncontrol`=row.names(resD_LDvsCtrl_sig),
+                  `Cohort A\nhigh dose vs.\ncontrol`=row.names(resA_HDvsCtrl_sig),
+                  `Cohort B\nhigh dose vs.\ncontrol`=row.names(resB_HDvsCtrl_sig), 
+                  `Cohort C\nhigh dose vs.\ncontrol`=row.names(resC_HDvsCtrl_sig),
+                  `Cohort D\nhigh dose vs.\ncontrol`=row.names(resD_HDvsCtrl_sig) )
+de_genes <- lapply(de_genes, function(x) anno[x, "ensembl_gene_id"])
+
+go_term_all_HD <- compareCluster(geneClusters= de_genes, 
+               fun = "enrichGO",
+               universe = common_genes, #intersection of all noNA genes
+                             OrgDb = "org.Rn.eg.db",
+                             keyType = "ENSEMBL",
+                             ont = "BP",
+                             pvalueCutoff = 0.025,
+                             qvalueCutoff = 0.04, 
+                             pAdjustMethod = "fdr",
+                             minGSSize = 10, 
+                             maxGSSize = 500)
+#cut some redundant Go terms
+go_term_all_simple <- clusterProfiler::simplify(go_term_all_HD, 
+                              cutoff=0.7, 
+                              by="p.adjust", 
+                              select_fun=min)
+
+dotplot(go_term_all_simple, showCategory=12, title="Cohort A-D") 
+```
+
+# DE ANALYSIS BETWEEN COHORTS WITHIN TREATMENT GROUP
+
+```{r groupDE_stats2}
+res_AvsC_ctrl <- results(dds, contrast =c("Group", "C_control", "A_control"))
+res_AvsD_ctrl <- results(dds, contrast =c("Group", "D_control", "A_control"))
+```
+
+# SELECT AND ANALYSE F0-ASSOCIATED DIFFERENTIALLY EXPRESSED GENES
+
+```{r summarize}
+all_res <- cbind(res_f0[, c("baseMean", "log2FoldChange", "padj")],
+                 res_f1[, c("log2FoldChange", "padj")],
+                 res_AvsC_ctrl[, c("log2FoldChange", "padj")],
+                 res_AvsD_ctrl[, c("log2FoldChange", "padj")])
+
+all_res <- all_res[!apply(all_res[, grepl("padj", colnames(all_res))], 
+                          1, function(x) sum(is.na(x))>2), ] 
+all_res <- as.data.frame(all_res)
+
+all_res$genes <- anno[row.names(all_res), "rgd_symbol"]
+colnames(all_res) <- c("baseMean", 
+                       unlist(lapply(c("F0", "F1", "AvsC", "AvsD"), 
+                                     paste, c("log2FC", "FDR"), sep="_")), 
+                       "gene")
+```
+
+\tiny
+
+```{r summarize_results}
+knitr::kable(head(all_res))
+```
+
+\normalsize
+
+```{r sub_F0}
+selectedGenes <- all_res$F0_FDR < 0.1 &  all_res$baseMean>50
+selectedGenes[is.na(selectedGenes)] <- FALSE
+print(table(selectedGenes))
+```
+
+```{r sub_F0_GO, fig.width=15, fig.height=8}
+de_genes <- row.names(all_res[selectedGenes, ])
+de_genes <- anno[de_genes, "ensembl_gene_id"]
+universe <- anno[row.names(all_res), "ensembl_gene_id"]
+go <- enrichGO(de_genes,
+               universe = universe, 
+               OrgDb = "org.Rn.eg.db",
+               keyType = "ENSEMBL",
+               ont = "ALL", 
+               pvalueCutoff = 0.1, 
+               qvalueCutoff = 0.2, 
+               pAdjustMethod = "fdr",
+               minGSSize = 10,
+               maxGSSize = 500)
+
+dotplot(go, showCategory=30, title="F0 effects")
+```
+
+\tiny
+
+```{r sub_F0_GO_res}
+tmp <- data.frame(go)
+tmp$geneID <- sapply(strsplit(tmp$geneID, "/"), 
+                    function(x) paste0(anno[anno$ensembl_gene_id%in%x, 2],
+                                       collapse="/ "))
+knitr::kable(head(tmp))
+```
+
+\normalsize
+
+```{r sub_F1_F2}
+selectedGenes <- selectedGenes & sign(all_res$F0_log2FC)==sign(all_res$F1_log2FC)
+selectedGenes[is.na(selectedGenes)] <- FALSE
+table(selectedGenes)
+selectedGenes <- selectedGenes & all_res$AvsC_FDR <0.2 & all_res$AvsD_FDR <0.1
+selectedGenes[is.na(selectedGenes)] <- FALSE
+print(table(selectedGenes))
+```
+
+\tiny
+
+```{r sub_F1_F2_results}
+knitr::kable(head(all_res[selectedGenes, ]))
+```
+
+\normalsize
+
+```{r sub_F1_F2_GO}
+de_genes <- row.names(all_res[selectedGenes, ])
+de_genes <- anno[de_genes, "ensembl_gene_id"]
+universe <- anno[row.names(all_res), "ensembl_gene_id"]
+go <- enrichGO(de_genes,
+               universe = universe, 
+               OrgDb = "org.Rn.eg.db",
+               keyType = "ENSEMBL",
+               ont = "ALL", 
+               pvalueCutoff = 0.1, 
+               qvalueCutoff = 0.2, 
+               pAdjustMethod = "fdr",
+               minGSSize = 10,
+               maxGSSize = 500)
+
+dotplot(go, showCategory=30)
+```
+
+\tiny 
+
+```{r sub_F1_F2_GO_results}
+tmp <- data.frame(go)
+tmp$geneID <- sapply(strsplit(tmp$geneID, "/"), 
+                    function(x) paste0(anno[anno$ensembl_gene_id%in%x, 2],
+                                       collapse="/ "))
+knitr::kable(head(tmp))
+```
+
+\small
+
+```{r sessioinfo}
+sessionInfo()
+```
